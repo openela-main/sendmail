@@ -1,0 +1,204 @@
+commit 72c678024d5f7b97bae8c20cc3fb2e0299778d5b
+Author: Tomas Korbar <tkorbar@redhat.com>
+Date:   Mon Sep 7 12:41:05 2020 +0200
+
+    Backport confTLS_FALLBACK_TO_CLEAR Configuration option
+
+diff --git a/cf/README b/cf/README
+index 91e69a9..e8941ad 100644
+--- a/cf/README
++++ b/cf/README
+@@ -4011,6 +4011,10 @@ confUSERDB_SPEC		UserDatabaseSpec
+ confFALLBACK_MX		FallbackMXhost	[undefined] Fallback MX host.
+ confFALLBACK_SMARTHOST	FallbackSmartHost
+ 					[undefined] Fallback smart host.
++confTLS_FALLBACK_TO_CLEAR	TLSFallbacktoClear
++					[undefined] If set, immediately try
++					a connection again without STARTTLS
++					after a TLS handshake failure.
+ confTRY_NULL_MX_LIST	TryNullMXList	[False] If this host is the best MX
+ 					for a host and other arrangements
+ 					haven't been made, try connecting
+diff --git a/cf/m4/proto.m4 b/cf/m4/proto.m4
+index 0df3416..a741d97 100644
+--- a/cf/m4/proto.m4
++++ b/cf/m4/proto.m4
+@@ -656,6 +656,8 @@ _OPTION(CipherList, `confCIPHER_LIST', `')
+ _OPTION(ServerSSLOptions, `confSERVER_SSL_OPTIONS', `')
+ # client side SSL options
+ _OPTION(ClientSSLOptions, `confCLIENT_SSL_OPTIONS', `')
++# TLS: fall back to clear text after handshake failure?
++_OPTION(TLSFallbacktoClear, `confTLS_FALLBACK_TO_CLEAR', `')
+ 
+ # Input mail filters
+ _OPTION(InputMailFilters, `confINPUT_MAIL_FILTERS', `')
+@@ -2856,6 +2858,7 @@ R<$-:$+><VERIFY $*> <$*> FAIL	$#error $@ $2 $: $1 " authentication failed"
+ R<$-:$+><VERIFY $*> <$*> NO	$#error $@ $2 $: $1 " not authenticated"
+ R<$-:$+><VERIFY $*> <$*> NOT	$#error $@ $2 $: $1 " no authentication requested"
+ R<$-:$+><VERIFY $*> <$*> NONE	$#error $@ $2 $: $1 " other side does not support STARTTLS"
++R<$-:$+><VERIFY $*> <$*> CLEAR	$#error $@ $2 $: $1 " STARTTLS disabled locally"
+ dnl some other value for ${verify}
+ R<$-:$+><VERIFY $*> <$*> $+	$#error $@ $2 $: $1 " authentication failure " $4
+ dnl some level of encryption required: get the maximum level (case 2.)
+diff --git a/doc/op/op.me b/doc/op/op.me
+index 57e25cd..97d3b9c 100644
+--- a/doc/op/op.me
++++ b/doc/op/op.me
+@@ -8340,6 +8340,22 @@ PostMilter is useful only when
+ .i sendmail
+ is running as an SMTP server; in all other situations it
+ acts the same as True.
++.ip TLSFallbacktoClear
++[no short name]
++If set,
++.i sendmail
++immediately tries an outbound connection again without STARTTLS
++after a TLS handshake failure.
++Note:
++this applies to all connections even if TLS specific requirements are set
++(see rulesets
++.i tls_rcpt
++and
++.i tls_client
++).
++Hence such requirements will cause an error on a retry without STARTTLS.
++Therefore they should only trigger a temporary failure so the connection
++is later on tried again.
+ .ip TLSSrvOptions
+ [no short name]
+ List of options for SMTP STARTTLS for the server
+diff --git a/sendmail/deliver.c b/sendmail/deliver.c
+index 8027a50..af42e8f 100644
+--- a/sendmail/deliver.c
++++ b/sendmail/deliver.c
+@@ -1334,6 +1334,10 @@ deliver(e, firstto)
+ 	char *pv[MAXPV + 1];
+ 	char buf[MAXNAME + 1];
+ 	char cbuf[MAXPATHLEN];
++#if STARTTLS
++	/* 0: try TLS, 1: try without TLS again, >1: don't try again */
++	int tlsstate;
++#endif
+ 
+ 	errno = 0;
+ 	SM_REQUIRE(firstto != NULL);	/* same as to */
+@@ -1349,7 +1353,9 @@ deliver(e, firstto)
+ 	e->e_statmsg = NULL;
+ 	SmtpError[0] = '\0';
+ 	xstart = curtime();
+-
++#if STARTTLS
++	tlsstate = 0;
++#endif
+ 	if (tTd(10, 1))
+ 		sm_dprintf("\n--deliver, id=%s, mailer=%s, host=`%s', first user=`%s'\n",
+ 			e->e_id, m->m_name, host, to->q_user);
+@@ -2073,6 +2079,9 @@ tryhost:
+ 			hostnum++;
+ 			if (endp != NULL)
+ 				*endp = sep;
++#if STARTTLS
++			tlsstate = 0;
++#endif
+ 
+   one_last_try:
+ 			/* see if we already know that this host is fried */
+@@ -2960,6 +2969,8 @@ reconnect:	/* after switching to an encrypted connection */
+ 			usetls = bitset(MCIF_TLS, mci->mci_flags);
+ 			if (usetls)
+ 				usetls = !iscltflgset(e, D_NOTLS);
++			if (usetls)
++				usetls = tlsstate == 0;
+ 
+ 			host = macvalue(macid("{server_name}"), e);
+ 			if (usetls)
+@@ -3025,8 +3036,11 @@ reconnect:	/* after switching to an encrypted connection */
+ 				}
+ 			}
+ 			else
++			{
++				p = tlsstate == 0 ? "NONE": "CLEAR";
+ 				macdefine(&e->e_macro, A_PERM,
+-					  macid("{verify}"), "NONE");
++					  macid("{verify}"), p);
++			}
+ 			olderrors = Errors;
+ 			QuickAbort = false;
+ 			SuprErrs = true;
+@@ -3077,6 +3091,10 @@ reconnect:	/* after switching to an encrypted connection */
+ 					}
+ 					mci->mci_flags &= ~MCIF_TLSACT;
+ 					(void) endmailer(mci, e, pv);
++					if (TLSFallbacktoClear)
++					{
++						++tlsstate;
++					}
+ 				}
+ 				else
+ 				{
+@@ -3119,6 +3137,27 @@ reconnect:	/* after switching to an encrypted connection */
+ 				mci_clr_extensions(mci);
+ 				goto reconnect;
+ 			}
++			if (tlsstate == 1)
++			{
++				if (tTd(11, 1))
++				{
++					sm_syslog(LOG_DEBUG, NOQID,
++						"STARTTLS=client, relay=%.100s, tlsstate=%d, status=trying_again",
++						mci->mci_host, tlsstate);
++					mci_dump(NULL, mci, true);
++				}
++				++tlsstate;
++				/*
++				**  Fake the status so a new connection is
++				**  tried, otherwise the TLS error will
++				**  "persist" during this delivery attempt.
++				*/
++
++				mci->mci_errno = 0;
++				rcode = EX_OK;
++				mci_setstat(mci, rcode, NULL, NULL);
++				goto one_last_try;
++			}
+ 		}
+ # endif /* STARTTLS */
+ # if SASL
+diff --git a/sendmail/readcf.c b/sendmail/readcf.c
+index 86892f5..82660f4 100644
+--- a/sendmail/readcf.c
++++ b/sendmail/readcf.c
+@@ -2911,7 +2911,10 @@ static struct optioninfo
+ #endif
+ #define O_USECOMPRESSEDIPV6ADDRESSES 0xec
+ 	{ "UseCompressedIPv6Addresses",	O_USECOMPRESSEDIPV6ADDRESSES, OI_NONE },
+-
++#if STARTTLS
++# define O_TLSFB2CLEAR		0xef
++	{ "TLSFallbacktoClear",	O_TLSFB2CLEAR,	OI_NONE	},
++#endif
+ 	{ NULL,				'\0',		OI_NONE	}
+ };
+ 
+@@ -4305,6 +4308,9 @@ setoption(opt, val, safe, sticky, e)
+ #endif /* SASL */
+ 
+ #if STARTTLS
++	  case O_TLSFB2CLEAR:
++		TLSFallbacktoClear = atobool(val);
++		break;
+ 	  case O_SRVCERTFILE:
+ 		SET_STRING_EXP(SrvCertFile);
+ 	  case O_SRVKEYFILE:
+diff --git a/sendmail/sendmail.h b/sendmail/sendmail.h
+index 441399c..9be1e76 100644
+--- a/sendmail/sendmail.h
++++ b/sendmail/sendmail.h
+@@ -2032,6 +2032,7 @@ EXTERN char	*CRLPath;	/* path to CRLs (dir. with hashes) */
+ #endif /* _FFR_CRLPATH */
+ EXTERN unsigned long	TLS_Srv_Opts;	/* TLS server options */
+ EXTERN unsigned long	Srv_SSL_Options, Clt_SSL_Options; /* SSL options */
++EXTERN bool	TLSFallbacktoClear;
+ #endif /* STARTTLS */
+ 
+ /*
