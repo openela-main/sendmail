@@ -29,7 +29,7 @@
 Summary: A widely used Mail Transport Agent (MTA)
 Name: sendmail
 Version: 8.16.1
-Release: 10%{?dist}
+Release: 11%{?dist}
 License: Sendmail
 URL: http://www.sendmail.org/
 
@@ -655,12 +655,12 @@ exit 0
 %config(noreplace) %{maildir}/virtusertable
 
 %ghost %{maildir}/aliasesdb-stamp
-%ghost %{maildir}/virtusertable.db
-%ghost %{maildir}/access.db
-%ghost %{maildir}/domaintable.db
-%ghost %{maildir}/mailertable.db
+%ghost %attr(0640, root,root) %verify(not md5 size mtime) %{maildir}/virtusertable.db
+%ghost %attr(0640, root,root) %verify(not md5 size mtime) %{maildir}/access.db
+%ghost %attr(0640, root,root) %verify(not md5 size mtime) %{maildir}/domaintable.db
+%ghost %attr(0640, root,root) %verify(not md5 size mtime) %{maildir}/mailertable.db
 
-%ghost %{spooldir}/clientmqueue/sm-client.st
+%ghost %attr(0660, smmsp, smmsp) %verify(not md5 size mtime) %{spooldir}/clientmqueue/sm-client.st
 
 %{_unitdir}/sendmail.service
 %{_unitdir}/sm-client.service
@@ -709,6 +709,10 @@ exit 0
 
 
 %changelog
+* Mon Aug 14 2023 Jaroslav Škarvada <jskarvad@redhat.com> - 8.16.1-11
+- Fixed verification of the ghost files
+  Resolves: rhbz#2052091
+
 * Tue Aug 10 2021 Mohan Boddu <mboddu@redhat.com> - 8.16.1-10
 - Rebuilt for IMA sigs, glibc 2.34, aarch64 flags
   Related: rhbz#1991688
