@@ -1,0 +1,4 @@
+# sendmail spool
+d /var/spool/mqueue 0700 root mail -
+d /var/spool/clientmqueue 0770 smmsp smmsp -
+f /var/spool/clientmqueue/sm-client.st 0660 smmsp smmsp
